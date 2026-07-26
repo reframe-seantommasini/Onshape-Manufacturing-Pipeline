@@ -384,75 +384,11 @@ function matchMaterial(osMaterial) {
   return null;
 }
 
-// ── PLATE AUTO-DETECT ──
-const PLATE_THICKNESSES_IN = TEAM_CONFIG.plateThicknesses;
-const PLATE_TOLERANCE_IN   = 0.005; // ±0.005" snap window to account for fillets/chamfers
+// ── PART GEOMETRY FETCH ─────────────────────────────────────────────────────
+// Single FeatureScript call returning bbox + end cap face area. All four
+// classifiers run from this one result — 1 API call instead of up to 4.
 
-async function autoDetectPlate(part) {
-  // Returns { partType: 'Plate', thickness: '1/8 in' } or null if no match.
-  // Uses FeatureScript to get the exact bounding box — the only reliable OnShape API path.
-  if (CONFIG.demo) return null;
-  if (!docId || !wvmId || !part.studio || !part.id) return null;
-  try {
-    const path = `/partstudios/d/${docId}/${wvmType}/${wvmId}/e/${part.studio}/featurescript`;
-    const script = `
-function(context is Context, queries) {
-  var partQuery = qTransient("${part.id}");
-  var bbox = evBox3d(context, {
-    "topology" : partQuery,
-    "tight"    : true
-  });
-  return { "minX": bbox.minCorner[0], "minY": bbox.minCorner[1], "minZ": bbox.minCorner[2],
-           "maxX": bbox.maxCorner[0], "maxY": bbox.maxCorner[1], "maxZ": bbox.maxCorner[2] };
-}`;
-    const resp = await fetch(`/api/onshape?path=${encodeURIComponent(path)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ script })
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const val = data?.result?.message?.value ?? data?.result?.value;
-    if (!val) return null;
-    const get = (k) => {
-      if (Array.isArray(val)) {
-        const e = val.find(x => (x.key?.value ?? x.key) === k);
-        return e?.value?.value ?? e?.value;
-      }
-      return val[k]?.value ?? val[k];
-    };
-    const minX=get('minX'), minY=get('minY'), minZ=get('minZ');
-    const maxX=get('maxX'), maxY=get('maxY'), maxZ=get('maxZ');
-    const dims = [Math.abs(maxX-minX), Math.abs(maxY-minY), Math.abs(maxZ-minZ)].map(m => m * 39.3701);
-    const minDim = Math.min(...dims);
-    console.log(`[MFG autoDetect] dims (in): ${dims.map(d=>d.toFixed(4)).join(' x ')}, min: ${minDim.toFixed(4)}`);
-    for (const t of PLATE_THICKNESSES_IN) {
-      if (Math.abs(minDim - t.value) <= PLATE_TOLERANCE_IN) {
-        console.log(`[MFG v1.71] Auto-detected plate — min dim ${minDim.toFixed(4)}" → ${t.label}`);
-        return { partType: 'Plate', thickness: t.label };
-      }
-    }
-    console.log(`[MFG v1.71] No plate match — min dim: ${minDim.toFixed(4)}"`);
-    return null;
-  } catch(e) {
-    console.warn('[MFG autoDetect] FeatureScript failed:', e.message);
-    return null;
-  }
-}
-
-// ── TUBE AUTO-DETECT ──
-const TUBE_CROSS_SECTIONS    = TEAM_CONFIG.tubeCrossSections;
-const TUBE_CROSS_TOL_IN      = 0.05;  // ±0.050"
-const TUBE_MIN_LENGTH_IN     = 0.75;
-const TUBE_WALL_THICKNESSES_IN = TEAM_CONFIG.tubeWallThicknesses;
-const TUBE_WALL_TOL_IN       = 0.008; // ±0.008"
-
-async function autoDetectTube(part) {
-  // Returns { partType: 'Tube 1x2in', thickness: '0.09 in' } or null.
-  // Single FeatureScript call: gets bbox + end cap face area in one shot.
-  // Wall thickness is solved from the annulus area equation:
-  //   Rect (WxH): area = W*H - (W-2t)(H-2t)  => 4t^2 - 2t(W+H) + area = 0
-  // Takes the smaller positive root; snaps to known wall thicknesses.
+async function fetchPartGeometry(part) {
   if (CONFIG.demo) return null;
   if (!docId || !wvmId || !part.studio || !part.id) return null;
   try {
@@ -461,19 +397,18 @@ async function autoDetectTube(part) {
 function(context is Context, queries) {
   var partQuery = qTransient("${part.id}");
 
-  // Bounding box
   var bbox = evBox3d(context, { "topology": partQuery, "tight": true });
   var dx = abs(bbox.maxCorner[0] - bbox.minCorner[0]);
   var dy = abs(bbox.maxCorner[1] - bbox.minCorner[1]);
   var dz = abs(bbox.maxCorner[2] - bbox.minCorner[2]);
 
-  // Find long axis index (0=x,1=y,2=z) — true maximum of all three
+  // Long axis — needed to find end cap face for tube wall thickness
   var longAxis = 0;
   var longDim = dx;
   if (dy > longDim) { longAxis = 1; longDim = dy; }
   if (dz > longDim) { longAxis = 2; longDim = dz; }
 
-  // Find an end cap face: planar face whose normal is parallel to the long axis
+  // First planar face perpendicular to the long axis; -1 if none found
   var faces = evaluateQuery(context, qOwnedByBody(qTransient("${part.id}"), EntityType.FACE));
   var endCapArea = -1;
   for (var face in faces)
@@ -516,186 +451,111 @@ function(context is Context, queries) {
     };
     const minX=get('minX'), minY=get('minY'), minZ=get('minZ');
     const maxX=get('maxX'), maxY=get('maxY'), maxZ=get('maxZ');
-    const endCapAreaM2 = get('endCapArea') ?? -1;
-
     const dims = [Math.abs(maxX-minX), Math.abs(maxY-minY), Math.abs(maxZ-minZ)]
       .map(m => m * 39.3701)
       .sort((a, b) => a - b);
-    const [d0, d1, d2] = dims;
-    console.log(`[MFG autoDetect] tube check dims (in): ${dims.map(d=>d.toFixed(4)).join(' x ')}`);
-
-    if (d2 < TUBE_MIN_LENGTH_IN) return null;
-
-    let matchedCs = null;
-    for (const cs of TUBE_CROSS_SECTIONS) {
-      if (Math.abs(d0 - cs.d1) <= TUBE_CROSS_TOL_IN &&
-          Math.abs(d1 - cs.d2) <= TUBE_CROSS_TOL_IN) {
-        matchedCs = cs;
-        break;
-      }
-    }
-    if (!matchedCs) {
-      console.log(`[MFG v1.71] No tube match -- cross-section ${d0.toFixed(4)}" x ${d1.toFixed(4)}"`);
-      return null;
-    }
-
-    // Solve wall thickness from end cap annulus area
-    // Quadratic: 4t^2 - 2t(W+H) + area = 0
-    let wallLabel = null;
-    if (endCapAreaM2 > 0) {
-      const areaIn2 = endCapAreaM2 * 1550.0031;
-      const W = d0, H = d1;
-      const a = 4, b = -2*(W+H), c = areaIn2;
-      const discriminant = b*b - 4*a*c;
-      if (discriminant >= 0) {
-        const t1 = (-b - Math.sqrt(discriminant)) / (2*a);
-        const t2 = (-b + Math.sqrt(discriminant)) / (2*a);
-        // Take the smaller positive root that is less than half the smaller outer dim
-        const t = (t1 > 0 && t1 < W/2) ? t1 : (t2 > 0 && t2 < W/2) ? t2 : null;
-        if (t !== null) {
-          console.log(`[MFG v1.71] End cap area ${areaIn2.toFixed(5)} in2, solved wall t=${t.toFixed(5)}"`);
-          for (const wt of TUBE_WALL_THICKNESSES_IN) {
-            if (Math.abs(t - wt.value) <= TUBE_WALL_TOL_IN) {
-              wallLabel = wt.label;
-              break;
-            }
-          }
-          if (!wallLabel) console.log(`[MFG v1.71] Wall t=${t.toFixed(5)}" did not snap to a known thickness`);
-        }
-      }
-    }
-
-    console.log(`[MFG v1.71] Auto-detected tube -- ${d0.toFixed(3)}" x ${d1.toFixed(3)}" -> ${matchedCs.label}, length ${d2.toFixed(3)}", wall: ${wallLabel ?? 'unknown'}`);
-    return { partType: matchedCs.label, thickness: wallLabel };
-
+    const endCapAreaM2 = get('endCapArea') ?? -1;
+    console.log(`[MFG autoDetect] dims (in): ${dims.map(d=>d.toFixed(4)).join(' x ')}, endCapArea: ${endCapAreaM2.toFixed(6)} m²`);
+    return { dims, endCapAreaM2 };
   } catch(e) {
-    console.warn('[MFG autoDetect] Tube FeatureScript failed:', e.message);
+    console.warn('[MFG autoDetect] FeatureScript failed:', e.message);
     return null;
   }
 }
 
-// ── HEX SHAFT AUTO-DETECT ──
+// ── PLATE CLASSIFIER ──
+const PLATE_THICKNESSES_IN = TEAM_CONFIG.plateThicknesses;
+const PLATE_TOLERANCE_IN   = 0.005; // ±0.005" snap window to account for fillets/chamfers
+
+function classifyPlate({ dims }) {
+  const minDim = dims[0]; // dims sorted ascending — smallest is the plate face
+  for (const t of PLATE_THICKNESSES_IN) {
+    if (Math.abs(minDim - t.value) <= PLATE_TOLERANCE_IN) {
+      console.log(`[MFG autoDetect] Plate — min dim ${minDim.toFixed(4)}" → ${t.label}`);
+      return { partType: 'Plate', thickness: t.label };
+    }
+  }
+  return null;
+}
+
+// ── TUBE CLASSIFIER ──
+const TUBE_CROSS_SECTIONS      = TEAM_CONFIG.tubeCrossSections;
+const TUBE_CROSS_TOL_IN        = 0.05;  // ±0.050"
+const TUBE_MIN_LENGTH_IN       = 0.75;
+const TUBE_WALL_THICKNESSES_IN = TEAM_CONFIG.tubeWallThicknesses;
+const TUBE_WALL_TOL_IN         = 0.008; // ±0.008"
+
+function classifyTube({ dims, endCapAreaM2 }) {
+  // Wall thickness solved from annulus area equation: 4t² - 2t(W+H) + area = 0
+  const [d0, d1, d2] = dims;
+  if (d2 < TUBE_MIN_LENGTH_IN) return null;
+  let matchedCs = null;
+  for (const cs of TUBE_CROSS_SECTIONS) {
+    if (Math.abs(d0 - cs.d1) <= TUBE_CROSS_TOL_IN &&
+        Math.abs(d1 - cs.d2) <= TUBE_CROSS_TOL_IN) {
+      matchedCs = cs; break;
+    }
+  }
+  if (!matchedCs) return null;
+  let wallLabel = null;
+  if (endCapAreaM2 > 0) {
+    const areaIn2 = endCapAreaM2 * 1550.0031;
+    const W = d0, H = d1;
+    const a = 4, b = -2*(W+H), c = areaIn2;
+    const discriminant = b*b - 4*a*c;
+    if (discriminant >= 0) {
+      const t1 = (-b - Math.sqrt(discriminant)) / (2*a);
+      const t2 = (-b + Math.sqrt(discriminant)) / (2*a);
+      const t = (t1 > 0 && t1 < W/2) ? t1 : (t2 > 0 && t2 < W/2) ? t2 : null;
+      if (t !== null) {
+        console.log(`[MFG autoDetect] Tube end cap area ${areaIn2.toFixed(5)} in², solved wall t=${t.toFixed(5)}"`);
+        for (const wt of TUBE_WALL_THICKNESSES_IN) {
+          if (Math.abs(t - wt.value) <= TUBE_WALL_TOL_IN) { wallLabel = wt.label; break; }
+        }
+      }
+    }
+  }
+  console.log(`[MFG autoDetect] Tube — ${d0.toFixed(3)}" x ${d1.toFixed(3)}" → ${matchedCs.label}, wall: ${wallLabel ?? 'unknown'}`);
+  return { partType: matchedCs.label, thickness: wallLabel };
+}
+
+// ── HEX SHAFT CLASSIFIER ──
 const HEX_SHAFT_PROFILES   = TEAM_CONFIG.hexShaftProfiles;
 const HEX_SHAFT_TOL_IN     = 0.015;
 const HEX_SHAFT_MIN_LEN_IN = 0.5;
 
-// ── ROUND SHAFT AUTO-DETECT ──
+function classifyHexShaft({ dims }) {
+  const [d0, d1, d2] = dims; // d0=F2F, d1=C2C, d2=length
+  if (d2 < HEX_SHAFT_MIN_LEN_IN) return null;
+  for (const p of HEX_SHAFT_PROFILES) {
+    const matchSharp   = Math.abs(d0 - p.f2f) <= HEX_SHAFT_TOL_IN && Math.abs(d1 - p.c2c_sharp)   <= HEX_SHAFT_TOL_IN;
+    const matchRounded = Math.abs(d0 - p.f2f) <= HEX_SHAFT_TOL_IN && Math.abs(d1 - p.c2c_rounded) <= HEX_SHAFT_TOL_IN;
+    if (matchSharp || matchRounded) {
+      console.log(`[MFG autoDetect] Hex Shaft ${p.diameter} — ${d0.toFixed(4)}" × ${d1.toFixed(4)}", length ${d2.toFixed(3)}"`);
+      return { partType: 'Hex Shaft', thickness: p.diameter };
+    }
+  }
+  return null;
+}
+
+// ── ROUND SHAFT CLASSIFIER ──
 const ROUND_SHAFT_DIAMETERS  = TEAM_CONFIG.roundShaftDiameters;
 const ROUND_SHAFT_TOL_IN     = 0.015;
 const ROUND_SHAFT_MIN_LEN_IN = 0.5;
 
-async function autoDetectHexShaft(part) {
-  // Returns { partType: '1/2 in Hex Shaft' } or null.
-  // Cross-section dims match F2F and C2C of known hex sizes; third dim is length.
-  if (CONFIG.demo) return null;
-  if (!docId || !wvmId || !part.studio || !part.id) return null;
-  try {
-    const path = `/partstudios/d/${docId}/${wvmType}/${wvmId}/e/${part.studio}/featurescript`;
-    const script = `
-function(context is Context, queries) {
-  var partQuery = qTransient("${part.id}");
-  var bbox = evBox3d(context, {
-    "topology" : partQuery,
-    "tight"    : true
-  });
-  return { "minX": bbox.minCorner[0], "minY": bbox.minCorner[1], "minZ": bbox.minCorner[2],
-           "maxX": bbox.maxCorner[0], "maxY": bbox.maxCorner[1], "maxZ": bbox.maxCorner[2] };
-}`;
-    const resp = await fetch(`/api/onshape?path=${encodeURIComponent(path)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ script })
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const val = data?.result?.message?.value ?? data?.result?.value;
-    if (!val) return null;
-    const get = (k) => {
-      if (Array.isArray(val)) {
-        const e = val.find(x => (x.key?.value ?? x.key) === k);
-        return e?.value?.value ?? e?.value;
-      }
-      return val[k]?.value ?? val[k];
-    };
-    const minX=get('minX'), minY=get('minY'), minZ=get('minZ');
-    const maxX=get('maxX'), maxY=get('maxY'), maxZ=get('maxZ');
-    const dims = [Math.abs(maxX-minX), Math.abs(maxY-minY), Math.abs(maxZ-minZ)]
-      .map(m => m * 39.3701)
-      .sort((a, b) => a - b);
-    const [d0, d1, d2] = dims; // d0=F2F, d1=C2C, d2=length
-    console.log(`[MFG autoDetect] hex shaft check dims (in): ${dims.map(d=>d.toFixed(4)).join(' x ')}`);
-    if (d2 < HEX_SHAFT_MIN_LEN_IN) return null;
-    for (const p of HEX_SHAFT_PROFILES) {
-      const matchSharp   = Math.abs(d0 - p.f2f) <= HEX_SHAFT_TOL_IN && Math.abs(d1 - p.c2c_sharp)   <= HEX_SHAFT_TOL_IN;
-      const matchRounded = Math.abs(d0 - p.f2f) <= HEX_SHAFT_TOL_IN && Math.abs(d1 - p.c2c_rounded) <= HEX_SHAFT_TOL_IN;
-      if (matchSharp || matchRounded) {
-        console.log(`[MFG v1.71] Auto-detected Hex Shaft ${p.diameter} — ${d0.toFixed(4)}" × ${d1.toFixed(4)}", length ${d2.toFixed(3)}"`);
-        return { partType: 'Hex Shaft', thickness: p.diameter };
-      }
+function classifyRoundShaft({ dims }) {
+  // Cylindrical: two smallest dims are equal (diameter); third is length.
+  // Square cross-section check distinguishes round from hex.
+  const [d0, d1, d2] = dims;
+  if (d2 < ROUND_SHAFT_MIN_LEN_IN) return null;
+  if (Math.abs(d0 - d1) > ROUND_SHAFT_TOL_IN) return null;
+  for (const s of ROUND_SHAFT_DIAMETERS) {
+    if (Math.abs(d0 - s.value) <= ROUND_SHAFT_TOL_IN) {
+      console.log(`[MFG autoDetect] Round Shaft ${s.diameter} — ${d0.toFixed(4)}" dia, length ${d2.toFixed(3)}"`);
+      return { partType: 'Round Shaft', thickness: s.diameter };
     }
-    console.log(`[MFG v1.71] No hex shaft match — cross-section ${d0.toFixed(4)}" × ${d1.toFixed(4)}"`);
-    return null;
-  } catch(e) {
-    console.warn('[MFG autoDetect] Hex shaft FeatureScript failed:', e.message);
-    return null;
   }
-}
-
-async function autoDetectRoundShaft(part) {
-  // Returns { partType: 'Round Shaft', thickness: '1/2 in' } or null.
-  // Cylindrical shaft: two cross-section dims are equal (diameter); third dim is length.
-  if (CONFIG.demo) return null;
-  if (!docId || !wvmId || !part.studio || !part.id) return null;
-  try {
-    const path = `/partstudios/d/${docId}/${wvmType}/${wvmId}/e/${part.studio}/featurescript`;
-    const script = `
-function(context is Context, queries) {
-  var partQuery = qTransient("${part.id}");
-  var bbox = evBox3d(context, {
-    "topology" : partQuery,
-    "tight"    : true
-  });
-  return { "minX": bbox.minCorner[0], "minY": bbox.minCorner[1], "minZ": bbox.minCorner[2],
-           "maxX": bbox.maxCorner[0], "maxY": bbox.maxCorner[1], "maxZ": bbox.maxCorner[2] };
-}`;
-    const resp = await fetch(`/api/onshape?path=${encodeURIComponent(path)}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ script })
-    });
-    if (!resp.ok) return null;
-    const data = await resp.json();
-    const val = data?.result?.message?.value ?? data?.result?.value;
-    if (!val) return null;
-    const get = (k) => {
-      if (Array.isArray(val)) {
-        const e = val.find(x => (x.key?.value ?? x.key) === k);
-        return e?.value?.value ?? e?.value;
-      }
-      return val[k]?.value ?? val[k];
-    };
-    const minX=get('minX'), minY=get('minY'), minZ=get('minZ');
-    const maxX=get('maxX'), maxY=get('maxY'), maxZ=get('maxZ');
-    const dims = [Math.abs(maxX-minX), Math.abs(maxY-minY), Math.abs(maxZ-minZ)]
-      .map(m => m * 39.3701)
-      .sort((a, b) => a - b);
-    const [d0, d1, d2] = dims; // d0 ≈ d1 = diameter, d2 = length
-    console.log(`[MFG autoDetect] round shaft check dims (in): ${dims.map(d=>d.toFixed(4)).join(' x ')}`);
-    if (d2 < ROUND_SHAFT_MIN_LEN_IN) return null;
-    // Cross-section must be square (d0 ≈ d1) — distinguishes round from hex
-    if (Math.abs(d0 - d1) > ROUND_SHAFT_TOL_IN) return null;
-    for (const s of ROUND_SHAFT_DIAMETERS) {
-      if (Math.abs(d0 - s.value) <= ROUND_SHAFT_TOL_IN) {
-        console.log(`[MFG v1.71] Auto-detected Round Shaft ${s.diameter} — ${d0.toFixed(4)}" dia, length ${d2.toFixed(3)}"`);
-        return { partType: 'Round Shaft', thickness: s.diameter };
-      }
-    }
-    console.log(`[MFG v1.71] No round shaft match — diameter ~${d0.toFixed(4)}"`);
-    return null;
-  } catch(e) {
-    console.warn('[MFG autoDetect] Round shaft FeatureScript failed:', e.message);
-    return null;
-  }
+  return null;
 }
 
 // All credentials are Vercel server-side env vars — no config screen needed.
@@ -1301,43 +1161,45 @@ async function showPartForm(part,idx){
     }
   }
 
-  // Auto-detect part geometry via FeatureScript (plate, tube, hex, round shaft).
-  // Always runs fresh — students edit CAD and submit cards in the same session,
-  // so caching geometry results risks returning stale auto-detection.
-  const detectedPlate = await autoDetectPlate(part);
-  if (detectedPlate) {
-    pillState['partType']  = detectedPlate.partType;
-    pillState['thickness'] = detectedPlate.thickness;
-    pillState['machine']   = 'CNC Router';
-    pillState['status']    = 'Needs CAM';
-  }
-
-  if (!detectedPlate) {
-    const detectedTube = await autoDetectTube(part);
-    if (detectedTube) {
-      pillState['partType'] = detectedTube.partType;
-      if (detectedTube.thickness) pillState['thickness'] = detectedTube.thickness;
+  // Auto-detect part geometry — single FeatureScript call, all classifiers run from it.
+  // Always runs fresh — students edit CAD and submit cards in the same session.
+  const geo = await fetchPartGeometry(part);
+  if (geo) {
+    const detectedPlate = classifyPlate(geo);
+    if (detectedPlate) {
+      pillState['partType']  = detectedPlate.partType;
+      pillState['thickness'] = detectedPlate.thickness;
+      pillState['machine']   = 'CNC Router';
+      pillState['status']    = 'Needs CAM';
     }
-  }
 
-  // Note: rounded/filleted hex shafts may report a square bounding box and fall through
-  // to round shaft detection instead — this is expected behavior given bbox limitations.
-  if (!detectedPlate && !pillState['partType']) {
-    const detectedShaft = await autoDetectHexShaft(part);
-    if (detectedShaft) {
-      pillState['partType']  = detectedShaft.partType;
-      pillState['thickness'] = detectedShaft.thickness;
-      pillState['machine']   = 'Lathe';
-      pillState['finish']    = 'None';
+    if (!detectedPlate) {
+      const detectedTube = classifyTube(geo);
+      if (detectedTube) {
+        pillState['partType'] = detectedTube.partType;
+        if (detectedTube.thickness) pillState['thickness'] = detectedTube.thickness;
+      }
     }
-  }
 
-  if (!detectedPlate && !pillState['partType']) {
-    const detectedRound = await autoDetectRoundShaft(part);
-    if (detectedRound) {
-      pillState['partType']  = detectedRound.partType;
-      pillState['thickness'] = detectedRound.thickness;
-      pillState['machine']   = 'Lathe';
+    // Note: rounded/filleted hex shafts may report a square bounding box and fall through
+    // to round shaft detection instead — this is expected behavior given bbox limitations.
+    if (!detectedPlate && !pillState['partType']) {
+      const detectedShaft = classifyHexShaft(geo);
+      if (detectedShaft) {
+        pillState['partType']  = detectedShaft.partType;
+        pillState['thickness'] = detectedShaft.thickness;
+        pillState['machine']   = 'Lathe';
+        pillState['finish']    = 'None';
+      }
+    }
+
+    if (!detectedPlate && !pillState['partType']) {
+      const detectedRound = classifyRoundShaft(geo);
+      if (detectedRound) {
+        pillState['partType']  = detectedRound.partType;
+        pillState['thickness'] = detectedRound.thickness;
+        pillState['machine']   = 'Lathe';
+      }
     }
   }
 
