@@ -1459,86 +1459,58 @@ async function submitPart(){
       await new Promise(r=>setTimeout(r,700));
       console.log('[MFG v1.83] DEMO:',payload);
     } else {
-      // 1. Create card in Neon first to get an ID
-      btn.innerHTML='<span class="spinner"></span> Saving card...';
-      let cardResult;
-      try {
-        cardResult = await addToBoard(payload);
-      } catch(boardErr) {
-        throw new Error('Board sync failed: ' + boardErr.message);
-      }
-      const cardId = cardResult?.card?.id || null;
+      // Files are exported and uploaded BEFORE the card is created, and their
+      // URLs go into the createCard payload. The panel has no Google sign-in, so
+      // it cannot call updateCard (auth-required) to attach files afterwards —
+      // doing so returned 401 and silently dropped STEP/thumbnail links.
+      // Blob paths use a random key since the card ID doesn't exist yet.
+      const uploadKey = crypto.randomUUID();
 
-      // 2. Export + upload DXF or STEP
+      // 1. Export + upload DXF or STEP
       // DXF export via OnShape API is not yet reliably supported for either sheet metal
       // or regular plates — disabled until a working approach is found.
       // Sheet metal parts will need DXF attached manually for now.
-      const isLaser   = getPillVal('machine') === DXF_MACHINE;
       const needsStep = STEP_STATUSES.has(status);
       const needsDxf  = false; // disabled
 
-      if (needsDxf && cardId) {
+      if (needsDxf) {
         btn.innerHTML='<span class="spinner"></span> Exporting DXF...';
         try {
           const fileData = await exportDxfFile(part);
           if (fileData) {
             btn.innerHTML='<span class="spinner"></span> Uploading DXF...';
-            const dxfUrl = await uploadStepToBlob(fileData, cardId); // reuses same blob upload path
-            payload.stepFileUrl  = dxfUrl;
+            payload.stepFileUrl  = await uploadStepToBlob(fileData, uploadKey); // reuses same blob upload path
             payload.stepFileName = fileData.filename;
-            const updateResp = await fetch('/api/board', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                action: 'updateCard', id: cardId,
-                updates: { stepFileUrl: dxfUrl, stepFileName: fileData.filename }
-              }),
-            });
-            const updateData = await updateResp.json();
-            if (!updateData.ok) console.error('[MFG v1.83] updateCard (DXF) failed:', updateData.error);
-            else console.log(`[MFG v1.83] DXF saved: ${dxfUrl}`);
+            console.log(`[MFG] DXF uploaded: ${payload.stepFileUrl}`);
           } else {
             showToast(`⚠️ DXF export timed out for "${name}" — card saved without file`, true);
           }
         } catch(dxfErr) {
-          console.warn('[MFG v1.83] DXF export failed:', dxfErr.message);
+          console.warn('[MFG] DXF export failed:', dxfErr.message);
           showToast(`⚠️ DXF export failed for "${name}": ${dxfErr.message}`, true);
         }
-      } else if (needsStep && cardId) {
+      } else if (needsStep) {
         btn.innerHTML='<span class="spinner"></span> Exporting STEP...';
         try {
           const fileData = await exportStepFile(part);
           if (fileData) {
             btn.innerHTML='<span class="spinner"></span> Uploading STEP...';
-            const stepUrl = await uploadStepToBlob(fileData, cardId);
-            payload.stepFileUrl  = stepUrl;
+            payload.stepFileUrl  = await uploadStepToBlob(fileData, uploadKey);
             payload.stepFileName = fileData.filename;
-            const updateResp = await fetch('/api/board', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                action: 'updateCard', id: cardId,
-                updates: { stepFileUrl: stepUrl, stepFileName: fileData.filename }
-              }),
-            });
-            const updateData = await updateResp.json();
-            if (!updateData.ok) console.error('[MFG v1.83] updateCard (STEP) failed:', updateData.error);
-            else console.log(`[MFG v1.83] STEP saved: ${stepUrl}`);
+            console.log(`[MFG] STEP uploaded: ${payload.stepFileUrl}`);
           } else {
             showToast(`⚠️ STEP export timed out for "${name}" — card saved without file`, true);
           }
         } catch(stepErr) {
-          console.warn('[MFG v1.83] STEP export failed:', stepErr.message);
+          console.warn('[MFG] STEP export failed:', stepErr.message);
           showToast(`⚠️ STEP export failed for "${name}": ${stepErr.message}`, true);
         }
-      } else if ((needsStep || needsDxf) && !cardId) {
-        console.warn('[MFG v1.83] No cardId returned — skipping file upload');
       } else {
-        console.log(`[MFG v1.83] Skipping file export — machine "${getPillVal('machine')}", status "${status}"`);
+        console.log(`[MFG] Skipping file export — machine "${getPillVal('machine')}", status "${status}"`);
       }
 
-      // 3. Upload thumbnail to Blob and save URL to card
-      if (cardId && part._thumbnailB64) {
+      // 2. Upload thumbnail — non-fatal, card still submits without it
+      if (part._thumbnailB64) {
         try {
           btn.innerHTML='<span class="spinner"></span> Uploading preview...';
           const thumbResp = await fetch('/api/board', {
@@ -1546,27 +1518,29 @@ async function submitPart(){
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               action: 'uploadThumbnail',
-              cardId,
-              filename: `${cardId}.png`,
+              cardId: uploadKey,
+              filename: `${uploadKey}.png`,
               fileBase64: part._thumbnailB64
             }),
           });
           const thumbData = await thumbResp.json();
           if (thumbData.ok && thumbData.url) {
-            await fetch('/api/board', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                action: 'updateCard', id: cardId,
-                updates: { thumbnailUrl: thumbData.url }
-              }),
-            });
-            console.log(`[MFG v1.83] Thumbnail saved: ${thumbData.url}`);
+            payload.thumbnailUrl = thumbData.url;
+            console.log(`[MFG] Thumbnail uploaded: ${thumbData.url}`);
+          } else {
+            console.warn('[MFG] Thumbnail upload failed:', thumbData.error);
           }
         } catch(thumbErr) {
-          console.warn('[MFG v1.83] Thumbnail upload failed:', thumbErr.message);
-          // Non-fatal — card still submitted successfully
+          console.warn('[MFG] Thumbnail upload failed:', thumbErr.message);
         }
+      }
+
+      // 3. Create the card with all file URLs already attached
+      btn.innerHTML='<span class="spinner"></span> Saving card...';
+      try {
+        await addToBoard(payload);
+      } catch(boardErr) {
+        throw new Error('Board sync failed: ' + boardErr.message);
       }
     } // end else (non-demo)
 
