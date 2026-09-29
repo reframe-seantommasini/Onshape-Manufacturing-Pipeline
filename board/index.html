@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Manufacturing Board — FRC 6328 v2.15</title>
+<title>Manufacturing Board — FRC 6328 v2.16</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet"/>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -114,6 +114,10 @@ header{background:var(--blue-dk);border-bottom:3px solid var(--gold);padding:10p
 .btn-step{font-family:'Barlow Condensed',sans-serif;font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;background:rgba(52,211,153,.1);color:#34d399;border:1px solid rgba(52,211,153,.25);border-radius:5px;padding:3px 9px;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:5px;}
 .btn-step:hover{background:rgba(52,211,153,.2);border-color:rgba(52,211,153,.5);}
 .btn-step:disabled{opacity:.5;cursor:not-allowed;}
+.file-row{display:flex;align-items:center;gap:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:6px 9px;}
+.file-row-name{flex:1;min-width:0;font-size:.84rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+.btn-file-remove{font-family:'Barlow Condensed',sans-serif;font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;background:transparent;color:var(--danger);border:1px solid rgba(224,82,82,.3);border-radius:5px;padding:3px 9px;cursor:pointer;transition:all .15s;}
+.btn-file-remove:hover{background:rgba(224,82,82,.12);border-color:rgba(224,82,82,.5);}
 .btn-pdf{font-family:'Barlow Condensed',sans-serif;font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;background:rgba(251,191,36,.1);color:#fbbf24;border:1px solid rgba(251,191,36,.25);border-radius:5px;padding:3px 9px;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:5px;}
 .btn-pdf:hover{background:rgba(251,191,36,.2);border-color:rgba(251,191,36,.5);}
 .btn-pdf:disabled{opacity:.5;cursor:not-allowed;}
@@ -384,6 +388,15 @@ tr:hover .lt-actions{opacity:1;}
       <div class="field full"><label>Assigned To</label><input type="text" id="f-assigned" placeholder="Student name"/></div>
       <div class="field full"><label>CAD Link</label><input type="url" id="f-cadlink" placeholder="https://cad.onshape.com/..."/></div>
       <div class="field full"><label>Notes</label><textarea id="f-notes" placeholder="Special instructions, tolerances, etc."></textarea></div>
+      <div class="field full">
+        <label>STEP / DXF File</label>
+        <div class="file-row">
+          <span class="file-row-name" id="f-step-name">No file attached</span>
+          <button type="button" class="btn-step" id="f-step-pick" onclick="document.getElementById('f-step-input').click()">Attach</button>
+          <button type="button" class="btn-file-remove" id="f-step-remove" onclick="removeStepFile()">Remove</button>
+        </div>
+        <input type="file" id="f-step-input" accept=".step,.stp,.dxf" style="display:none" onchange="pickStepFile(this)"/>
+      </div>
       <div class="field full">
         <div class="critical-toggle" id="critical-toggle" onclick="toggleCritical()">
           <div class="critical-toggle-dot"></div>
@@ -912,6 +925,7 @@ function openNewCardModal() {
     .forEach(id => document.getElementById(id).value = '');
   document.getElementById('critical-toggle').classList.remove('on');
   populateStatusSelect('Needs Drawing');
+  stepEdit = null; renderStepField();
   document.getElementById('modal').classList.add('open');
   document.getElementById('f-name').focus();
 }
@@ -935,9 +949,51 @@ function openEditModal(id) {
   document.getElementById('f-notes').value     = c.notes       || '';
   const ct = document.getElementById('critical-toggle');
   ct.classList.toggle('on', !!c.is_critical);
+  stepEdit = null; renderStepField();
   document.getElementById('modal').classList.add('open');
 }
-function closeModal() { document.getElementById('modal').classList.remove('open'); }
+function closeModal() { document.getElementById('modal').classList.remove('open'); stepEdit = null; }
+
+// ── STEP FILE (card modal) ──────────────────────────────────
+// Pending change to the card's STEP/DXF file, applied on Save:
+// null = unchanged, { file } = attach/replace, { remove: true } = remove.
+let stepEdit = null;
+// Uploads go through /api/board as base64 JSON, which must fit Vercel's 4.5 MB request limit
+const STEP_MAX_BYTES = 3 * 1024 * 1024;
+
+function renderStepField() {
+  const card = editingId ? allCards.find(c => c.id === editingId) : null;
+  const current = card?.step_file_url ? (card.step_file_name || 'Attached file') : null;
+  let label, hasFile;
+  if (stepEdit?.file)        { label = stepEdit.file.name + ' — uploads on save'; hasFile = true; }
+  else if (stepEdit?.remove) { label = 'No file — removed on save'; hasFile = false; }
+  else                       { label = current || 'No file attached'; hasFile = !!current; }
+  document.getElementById('f-step-name').textContent = label;
+  document.getElementById('f-step-pick').textContent = hasFile ? 'Replace' : 'Attach';
+  document.getElementById('f-step-remove').style.display = hasFile ? '' : 'none';
+}
+function pickStepFile(input) {
+  const file = input.files[0]; input.value = '';
+  if (!file) return;
+  if (!/\.(step|stp|dxf)$/i.test(file.name)) { toast('File must be .step, .stp, or .dxf', 'error'); return; }
+  if (file.size > STEP_MAX_BYTES) { toast('File is too large (max 3 MB)', 'error'); return; }
+  stepEdit = { file }; renderStepField();
+}
+function removeStepFile() {
+  const card = editingId ? allCards.find(c => c.id === editingId) : null;
+  // Only a file already saved on the card needs removing; otherwise just drop the pending pick
+  stepEdit = card?.step_file_url ? { remove: true } : null;
+  renderStepField();
+}
+async function uploadStepFile(file, cardId) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += 8192) binary += String.fromCharCode(...bytes.subarray(i, i + 8192));
+  const filename = file.name.replace(/\s+/g, '_');
+  // Timestamp folder so a replacement never reuses the old URL (avoids stale CDN copies)
+  const d = await apiPost({ action:'uploadStep', cardId:`${cardId}/${Date.now()}`, filename, fileBase64:btoa(binary) });
+  return { url: d.url, filename };
+}
 function toggleCritical() { document.getElementById('critical-toggle').classList.toggle('on'); }
 function handleBackdropClick(e) { if(e.target===e.currentTarget) closeModal(); }
 
@@ -962,6 +1018,14 @@ async function saveCard() {
   };
   try {
     if (editingId) {
+      if (stepEdit?.file) {
+        btn.textContent = 'Uploading file...';
+        const up = await uploadStepFile(stepEdit.file, editingId);
+        updates.stepFileUrl = up.url; updates.stepFileName = up.filename;
+        btn.textContent = 'Saving...';
+      } else if (stepEdit?.remove) {
+        updates.stepFileUrl = null; updates.stepFileName = null;
+      }
       await apiPost({ action:'updateCard', id:editingId, updates });
       const idx = allCards.findIndex(c=>c.id===editingId);
       if (idx>=0) allCards[idx] = { ...allCards[idx],
@@ -970,11 +1034,22 @@ async function saveCard() {
         thickness:updates.thickness, finish:updates.finish, quantity:updates.quantity,
         assigned_to:updates.assigned, cad_link:updates.cadLink, notes:updates.notes,
         is_critical:updates.isCritical,
+        ...('stepFileUrl' in updates ? { step_file_url:updates.stepFileUrl, step_file_name:updates.stepFileName } : {}),
         submitted_by:allCards[idx].submitted_by, created_at:allCards[idx].created_at };
       toast('Card updated');
     } else {
       const res = await apiPost({ action:'createCard', card:{ ...updates, submittedBy:userEmail } });
-      allCards.unshift(res.card);
+      const card = res.card;
+      allCards.unshift(card);
+      if (stepEdit?.file) {
+        // The upload path needs the card ID, so attach the file after creating the card
+        btn.textContent = 'Uploading file...';
+        try {
+          const up = await uploadStepFile(stepEdit.file, card.id);
+          await apiPost({ action:'updateCard', id:card.id, updates:{ stepFileUrl:up.url, stepFileName:up.filename } });
+          card.step_file_url = up.url; card.step_file_name = up.filename;
+        } catch(e) { toast('Card created, but file upload failed: '+e.message,'error'); closeModal(); renderCurrentView(); populateFilterDropdowns(); return; }
+      }
       toast('Card created');
     }
     closeModal(); renderCurrentView(); populateFilterDropdowns();

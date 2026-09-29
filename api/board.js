@@ -135,6 +135,12 @@ export default async function handler(req, res) {
       const qty = u.quantity === undefined ? undefined
                 : (u.quantity === '' || u.quantity === null) ? null
                 : parseInt(u.quantity, 10);
+      // Replacing or removing the STEP file: remember the old URL so its blob can be deleted
+      let oldStepUrl = null;
+      if (u.stepFileUrl !== undefined) {
+        const rows = await sql`SELECT step_file_url FROM cards WHERE id = ${id}`;
+        oldStepUrl = rows[0]?.step_file_url || null;
+      }
       await sql`
         UPDATE cards SET
           name           = COALESCE(${u.name          ?? null}, name),
@@ -158,6 +164,9 @@ export default async function handler(req, res) {
           updated_at     = NOW()
         WHERE id = ${id}
       `;
+      if (oldStepUrl && oldStepUrl !== (u.stepFileUrl ?? null)) {
+        try { await del(oldStepUrl); } catch (_) {}
+      }
       return res.json({ ok: true });
 
     } else if (action === 'moveCard') {
