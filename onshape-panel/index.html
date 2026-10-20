@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Manufacturing Pipeline — FRC 6328 v1.84</title>
+<title>Manufacturing Pipeline — FRC 6328 v1.85</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet"/>
 <style>
   :root {
@@ -166,7 +166,7 @@
     <div class="hdr-divider"></div>
     <span class="hdr-title">Mfg Pipeline</span>
     <span class="doc-badge" id="doc-label">No document</span>
-    <span style="font-size:.6rem;color:var(--muted);margin-left:4px;">v1.84</span>
+    <span style="font-size:.6rem;color:var(--muted);margin-left:4px;">v1.85</span>
   </header>
 
   <div id="selection-banner">
@@ -1202,7 +1202,7 @@ async function showPartForm(part,idx){
     pillState['partType'] = 'Sheet Metal';
     pillState['machine']  = 'Laser Cutter';
     pillState['status']   = 'Ready for Laser Cutter';
-    console.log('[MFG v1.84] Auto-detected Sheet Metal — pre-selecting Laser Cutter + Ready for Laser Cutter');
+    console.log('[MFG v1.85] Auto-detected Sheet Metal — pre-selecting Laser Cutter + Ready for Laser Cutter');
   }
 
   // Apply global project if set in the side panel
@@ -1289,7 +1289,7 @@ async function fetchPartThumbnail(part) {
     wrap.innerHTML = `<img src="data:image/png;base64,${b64}" alt="${esc(part.name)} preview"/>`;
   } catch(e) {
     if (wrap) wrap.style.display = 'none';
-    console.warn('[MFG v1.84] Thumbnail fetch failed:', e.message);
+    console.warn('[MFG v1.85] Thumbnail fetch failed:', e.message);
   }
 }
 
@@ -1497,12 +1497,15 @@ async function submitPart(){
     isCritical:document.getElementById('f-critical').classList.contains('on')};
   if(v('f-student')) localStorage.setItem('mfg_student_name', v('f-student'));
   document.getElementById('f-critical').classList.remove('on');
+  // File problems are collected and shown in the final toast. Showing them as they
+  // happen did not work: the success toast replaced them within a second.
+  const fileWarnings = [];
 
   try{
     if(CONFIG.demo){
       btn.innerHTML='<span class="spinner"></span> Sending...';
       await new Promise(r=>setTimeout(r,700));
-      console.log('[MFG v1.84] DEMO:',payload);
+      console.log('[MFG v1.85] DEMO:',payload);
     } else {
       // Files are exported and uploaded BEFORE the card is created, and their
       // URLs go into the createCard payload. The panel has no Google sign-in, so
@@ -1526,13 +1529,13 @@ async function submitPart(){
             btn.innerHTML='<span class="spinner"></span> Uploading DXF...';
             payload.stepFileUrl  = await uploadStepToBlob(fileData, uploadKey); // reuses same blob upload path
             payload.stepFileName = fileData.filename;
-            console.log(`[MFG v1.84] DXF uploaded: ${payload.stepFileUrl}`);
+            console.log(`[MFG v1.85] DXF uploaded: ${payload.stepFileUrl}`);
           } else {
-            showToast(`⚠️ DXF export timed out for "${name}" — card saved without file`, true);
+            fileWarnings.push("DXF export timed out");
           }
         } catch(dxfErr) {
-          console.warn('[MFG v1.84] DXF export failed:', dxfErr.message);
-          showToast(`⚠️ DXF export failed for "${name}": ${dxfErr.message}`, true);
+          console.warn('[MFG v1.85] DXF export failed:', dxfErr.message);
+          fileWarnings.push(`DXF export failed: ${dxfErr.message}`);
         }
       } else if (needsStep) {
         btn.innerHTML='<span class="spinner"></span> Exporting STEP...';
@@ -1542,16 +1545,16 @@ async function submitPart(){
             btn.innerHTML='<span class="spinner"></span> Uploading STEP...';
             payload.stepFileUrl  = await uploadStepToBlob(fileData, uploadKey);
             payload.stepFileName = fileData.filename;
-            console.log(`[MFG v1.84] STEP uploaded: ${payload.stepFileUrl}`);
+            console.log(`[MFG v1.85] STEP uploaded: ${payload.stepFileUrl}`);
           } else {
-            showToast(`⚠️ STEP export timed out for "${name}" — card saved without file`, true);
+            fileWarnings.push("STEP export timed out");
           }
         } catch(stepErr) {
-          console.warn('[MFG v1.84] STEP export failed:', stepErr.message);
-          showToast(`⚠️ STEP export failed for "${name}": ${stepErr.message}`, true);
+          console.warn('[MFG v1.85] STEP export failed:', stepErr.message);
+          fileWarnings.push(`STEP export failed: ${stepErr.message}`);
         }
       } else {
-        console.log(`[MFG v1.84] Skipping file export — machine "${getPillVal('machine')}", status "${status}"`);
+        console.log(`[MFG v1.85] Skipping file export — machine "${getPillVal('machine')}", status "${status}"`);
       }
 
       // 2. Upload PDF drawing — only for manual machining statuses
@@ -1561,10 +1564,10 @@ async function submitPart(){
         try {
           payload.pdfFileUrl  = await uploadPdfToBlob(attachedFile, uploadKey);
           payload.pdfFileName = attachedFile.name;
-          console.log(`[MFG v1.84] PDF uploaded: ${payload.pdfFileUrl}`);
+          console.log(`[MFG v1.85] PDF uploaded: ${payload.pdfFileUrl}`);
         } catch(pdfErr) {
-          console.warn('[MFG v1.84] PDF upload failed:', pdfErr.message);
-          showToast(`⚠️ PDF upload failed for "${name}": ${pdfErr.message}`, true);
+          console.warn('[MFG v1.85] PDF upload failed:', pdfErr.message);
+          fileWarnings.push(`PDF upload failed: ${pdfErr.message}`);
         }
       }
 
@@ -1585,12 +1588,12 @@ async function submitPart(){
           const thumbData = await thumbResp.json();
           if (thumbData.ok && thumbData.url) {
             payload.thumbnailUrl = thumbData.url;
-            console.log(`[MFG v1.84] Thumbnail uploaded: ${thumbData.url}`);
+            console.log(`[MFG v1.85] Thumbnail uploaded: ${thumbData.url}`);
           } else {
-            console.warn('[MFG v1.84] Thumbnail upload failed:', thumbData.error);
+            console.warn('[MFG v1.85] Thumbnail upload failed:', thumbData.error);
           }
         } catch(thumbErr) {
-          console.warn('[MFG v1.84] Thumbnail upload failed:', thumbErr.message);
+          console.warn('[MFG v1.85] Thumbnail upload failed:', thumbErr.message);
         }
       }
 
@@ -1604,16 +1607,20 @@ async function submitPart(){
     } // end else (non-demo)
 
     addToHistory(payload);
-    showToast(`✓ Card submitted for "${name}"`);
-    advanceQueue();
+    if (fileWarnings.length) {
+      showToast(`⚠️ "${name}" saved, but ${fileWarnings.join('; ')}`, true, 12000);
+    } else {
+      showToast(`✓ Card submitted for "${name}"`);
+    }
+    advanceQueue(fileWarnings.length > 0);
   }catch(err){showToast('Submit error: '+err.message,true);}
   finally{btn.disabled=false;btn.textContent=queueIdx>=queue.length-1?'✓ Submit':'Submit & Next →';}
 }
-function advanceQueue(){
+function advanceQueue(keepToast=false){
   queueIdx++;
   if(queueIdx>=queue.length){
     document.getElementById('modal-overlay').classList.remove('open');
-    showToast(`🎉 All ${queue.length} card${queue.length!==1?'s':''} submitted!`);
+    if(!keepToast) showToast(`🎉 All ${queue.length} card${queue.length!==1?'s':''} submitted!`);
     clearSelection();
   } else showPartForm(queue[queueIdx],queueIdx);
 }
@@ -1647,10 +1654,10 @@ async function addToBoard(p) {
 
 // ── TOAST ──
 let toastTimer;
-function showToast(msg,isError=false){
+function showToast(msg,isError=false,ms=3200){
   const t=document.getElementById('toast');
   t.textContent=msg; t.className=isError?'error show':'show';
-  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=isError?'error':'',3200);
+  clearTimeout(toastTimer); toastTimer=setTimeout(()=>t.className=isError?'error':'',ms);
 }
 </script>
 </body>
