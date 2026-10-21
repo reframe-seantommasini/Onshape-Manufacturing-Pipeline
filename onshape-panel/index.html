@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Manufacturing Pipeline — FRC 6328 v1.85</title>
+<title>Manufacturing Pipeline — FRC 6328 v1.86</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet"/>
 <style>
   :root {
@@ -166,7 +166,7 @@
     <div class="hdr-divider"></div>
     <span class="hdr-title">Mfg Pipeline</span>
     <span class="doc-badge" id="doc-label">No document</span>
-    <span style="font-size:.6rem;color:var(--muted);margin-left:4px;">v1.85</span>
+    <span style="font-size:.6rem;color:var(--muted);margin-left:4px;">v1.86</span>
   </header>
 
   <div id="selection-banner">
@@ -1202,7 +1202,7 @@ async function showPartForm(part,idx){
     pillState['partType'] = 'Sheet Metal';
     pillState['machine']  = 'Laser Cutter';
     pillState['status']   = 'Ready for Laser Cutter';
-    console.log('[MFG v1.85] Auto-detected Sheet Metal — pre-selecting Laser Cutter + Ready for Laser Cutter');
+    console.log('[MFG v1.86] Auto-detected Sheet Metal — pre-selecting Laser Cutter + Ready for Laser Cutter');
   }
 
   // Apply global project if set in the side panel
@@ -1289,7 +1289,7 @@ async function fetchPartThumbnail(part) {
     wrap.innerHTML = `<img src="data:image/png;base64,${b64}" alt="${esc(part.name)} preview"/>`;
   } catch(e) {
     if (wrap) wrap.style.display = 'none';
-    console.warn('[MFG v1.85] Thumbnail fetch failed:', e.message);
+    console.warn('[MFG v1.86] Thumbnail fetch failed:', e.message);
   }
 }
 
@@ -1313,54 +1313,11 @@ function onStatusChange(status){
   if (!needsPdf) { attachedFile = null; }
 }
 
-// ── STEP EXPORT ──
+// ── EXPORT POLLING ──
+// STEP export runs on the server now (lib/step-export.js). These are used by the
+// disabled browser-side DXF export below.
 const STEP_TIMEOUT_MS = 20000;
 const STEP_POLL_MS    = 3000; // increased from 1500 to reduce OnShape API usage
-
-async function exportStepFile(part) {
-  if (CONFIG.demo) return null;
-  if (!docId || !wvmId || !part.studio) return null;
-
-  // 1. Request translation via proxy
-  const transPath = `/partstudios/d/${docId}/${wvmType}/${wvmId}/e/${part.studio}/translations`;
-  const transResp = await fetch('/api/onshape?path=' + encodeURIComponent(transPath), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      formatName: 'STEP',
-      partIds: part.id,        // string, not array
-      storeInDocument: false,
-      translate: true,
-    })
-  });
-  if (!transResp.ok) {
-    const errText = await transResp.text();
-    throw new Error(`Translation request failed: ${transResp.status} — ${errText}`);
-  }
-  const trans = await transResp.json();
-  const translationId = trans.id;
-
-  // 2. Poll until DONE or timeout (3s intervals to save OnShape API requests)
-  const deadline = Date.now() + STEP_TIMEOUT_MS;
-  let foreignId = null;
-  while (Date.now() < deadline) {
-    await new Promise(r => setTimeout(r, STEP_POLL_MS));
-    const poll = await onshapeFetch(`/translations/${translationId}`);
-    if (poll.requestState === 'DONE') {
-      foreignId = poll.resultExternalDataIds?.[0];
-      break;
-    }
-    if (poll.requestState === 'FAILED') throw new Error('Translation failed');
-  }
-  if (!foreignId) return null;
-
-  // 3. Download file bytes via proxy (binary passthrough)
-  const filePath = `/documents/d/${docId}/externaldata/${foreignId}`;
-  const fileResp = await fetch('/api/onshape?path=' + encodeURIComponent(filePath));
-  if (!fileResp.ok) throw new Error('File download failed: ' + fileResp.status);
-  const blob = await fileResp.blob();
-  return { blob, filename: `${part.name.replace(/\s+/g,'_')}.step` };
-}
 
 // ── DXF EXPORT ──
 // Used when machine = Laser Cutter.
@@ -1505,7 +1462,7 @@ async function submitPart(){
     if(CONFIG.demo){
       btn.innerHTML='<span class="spinner"></span> Sending...';
       await new Promise(r=>setTimeout(r,700));
-      console.log('[MFG v1.85] DEMO:',payload);
+      console.log('[MFG v1.86] DEMO:',payload);
     } else {
       // Files are exported and uploaded BEFORE the card is created, and their
       // URLs go into the createCard payload. The panel has no Google sign-in, so
@@ -1529,32 +1486,21 @@ async function submitPart(){
             btn.innerHTML='<span class="spinner"></span> Uploading DXF...';
             payload.stepFileUrl  = await uploadStepToBlob(fileData, uploadKey); // reuses same blob upload path
             payload.stepFileName = fileData.filename;
-            console.log(`[MFG v1.85] DXF uploaded: ${payload.stepFileUrl}`);
+            console.log(`[MFG v1.86] DXF uploaded: ${payload.stepFileUrl}`);
           } else {
             fileWarnings.push("DXF export timed out");
           }
         } catch(dxfErr) {
-          console.warn('[MFG v1.85] DXF export failed:', dxfErr.message);
+          console.warn('[MFG v1.86] DXF export failed:', dxfErr.message);
           fileWarnings.push(`DXF export failed: ${dxfErr.message}`);
         }
       } else if (needsStep) {
-        btn.innerHTML='<span class="spinner"></span> Exporting STEP...';
-        try {
-          const fileData = await exportStepFile(part);
-          if (fileData) {
-            btn.innerHTML='<span class="spinner"></span> Uploading STEP...';
-            payload.stepFileUrl  = await uploadStepToBlob(fileData, uploadKey);
-            payload.stepFileName = fileData.filename;
-            console.log(`[MFG v1.85] STEP uploaded: ${payload.stepFileUrl}`);
-          } else {
-            fileWarnings.push("STEP export timed out");
-          }
-        } catch(stepErr) {
-          console.warn('[MFG v1.85] STEP export failed:', stepErr.message);
-          fileWarnings.push(`STEP export failed: ${stepErr.message}`);
-        }
+        // The server exports the STEP file in the background after creating the card
+        // (lib/step-export.js), so the student doesn't wait and can close the panel.
+        // The board shows "Exporting STEP" until it lands, or the failure reason.
+        payload.stepExport = { docId, wvmType, wvmId, elementId: part.studio, partId: part.id };
       } else {
-        console.log(`[MFG v1.85] Skipping file export — machine "${getPillVal('machine')}", status "${status}"`);
+        console.log(`[MFG v1.86] Skipping file export — machine "${getPillVal('machine')}", status "${status}"`);
       }
 
       // 2. Upload PDF drawing — only for manual machining statuses
@@ -1564,9 +1510,9 @@ async function submitPart(){
         try {
           payload.pdfFileUrl  = await uploadPdfToBlob(attachedFile, uploadKey);
           payload.pdfFileName = attachedFile.name;
-          console.log(`[MFG v1.85] PDF uploaded: ${payload.pdfFileUrl}`);
+          console.log(`[MFG v1.86] PDF uploaded: ${payload.pdfFileUrl}`);
         } catch(pdfErr) {
-          console.warn('[MFG v1.85] PDF upload failed:', pdfErr.message);
+          console.warn('[MFG v1.86] PDF upload failed:', pdfErr.message);
           fileWarnings.push(`PDF upload failed: ${pdfErr.message}`);
         }
       }
@@ -1588,12 +1534,12 @@ async function submitPart(){
           const thumbData = await thumbResp.json();
           if (thumbData.ok && thumbData.url) {
             payload.thumbnailUrl = thumbData.url;
-            console.log(`[MFG v1.85] Thumbnail uploaded: ${thumbData.url}`);
+            console.log(`[MFG v1.86] Thumbnail uploaded: ${thumbData.url}`);
           } else {
-            console.warn('[MFG v1.85] Thumbnail upload failed:', thumbData.error);
+            console.warn('[MFG v1.86] Thumbnail upload failed:', thumbData.error);
           }
         } catch(thumbErr) {
-          console.warn('[MFG v1.85] Thumbnail upload failed:', thumbErr.message);
+          console.warn('[MFG v1.86] Thumbnail upload failed:', thumbErr.message);
         }
       }
 
@@ -1609,6 +1555,8 @@ async function submitPart(){
     addToHistory(payload);
     if (fileWarnings.length) {
       showToast(`⚠️ "${name}" saved, but ${fileWarnings.join('; ')}`, true, 12000);
+    } else if (payload.stepExport) {
+      showToast(`✓ Card submitted for "${name}". STEP file is exporting, safe to close.`, false, 5000);
     } else {
       showToast(`✓ Card submitted for "${name}"`);
     }
@@ -1642,10 +1590,14 @@ function addToHistory(p){
 
 // ── BOARD SYNC ──
 async function addToBoard(p) {
+  const body = JSON.stringify({ action: 'createCard', card: p });
   const resp = await fetch('/api/board', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ action: 'createCard', card: p }),
+    body,
+    // keepalive lets the request finish sending even if the panel closes right
+    // after Submit; browsers only allow it for bodies under 64 KB
+    keepalive: body.length < 60000,
   });
   const data = await resp.json();
   if (!data.ok) throw new Error(data.error || 'Board sync error');

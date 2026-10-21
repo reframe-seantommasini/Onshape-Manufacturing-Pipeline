@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
-<title>Manufacturing Board — FRC 6328 v2.16</title>
+<title>Manufacturing Board — FRC 6328 v2.17</title>
 <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@400;600;700;800;900&family=Barlow:wght@400;500;600&display=swap" rel="stylesheet"/>
 <script src="https://accounts.google.com/gsi/client" async defer></script>
 <style>
@@ -114,6 +114,9 @@ header{background:var(--blue-dk);border-bottom:3px solid var(--gold);padding:10p
 .btn-step{font-family:'Barlow Condensed',sans-serif;font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;background:rgba(52,211,153,.1);color:#34d399;border:1px solid rgba(52,211,153,.25);border-radius:5px;padding:3px 9px;cursor:pointer;transition:all .15s;display:inline-flex;align-items:center;gap:5px;}
 .btn-step:hover{background:rgba(52,211,153,.2);border-color:rgba(52,211,153,.5);}
 .btn-step:disabled{opacity:.5;cursor:not-allowed;}
+.step-export-badge{font-family:'Barlow Condensed',sans-serif;font-size:.66rem;font-weight:700;letter-spacing:.06em;text-transform:uppercase;border-radius:5px;padding:3px 8px;white-space:nowrap;}
+.step-export-badge.pending{color:var(--muted);border:1px dashed var(--border);}
+.step-export-badge.failed{color:var(--danger);border:1px solid rgba(224,82,82,.3);cursor:help;}
 .file-row{display:flex;align-items:center;gap:8px;background:var(--input-bg);border:1px solid var(--border);border-radius:6px;padding:6px 9px;}
 .file-row-name{flex:1;min-width:0;font-size:.84rem;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
 .btn-file-remove{font-family:'Barlow Condensed',sans-serif;font-size:.68rem;font-weight:700;letter-spacing:.08em;text-transform:uppercase;background:transparent;color:var(--danger);border:1px solid rgba(224,82,82,.3);border-radius:5px;padding:3px 9px;cursor:pointer;transition:all .15s;}
@@ -450,6 +453,7 @@ tr:hover .lt-actions{opacity:1;}
     </div>
     <div class="detail-footer">
       <button class="btn-delete" id="detail-btn-delete" onclick="deleteFromDetail()">Delete</button>
+      <span id="detail-step-export"></span>
       <button class="btn-step" id="detail-btn-step" onclick="downloadStepFromDetail()">⬇ STEP</button>
       <button class="btn-pdf" id="detail-btn-pdf" onclick="downloadPdfFromDetail()">⬇ PDF</button>
       <button class="btn-cancel" onclick="closeDetailModal()">Close</button>
@@ -613,10 +617,11 @@ async function pollCards() {
   try {
     const d = await apiGet();
     const fresh = d.cards || [];
-    const changed =
-      fresh.length !== allCards.length ||
-      fresh[0]?.updated_at !== allCards[0]?.updated_at ||
-      fresh[0]?.id !== allCards[0]?.id;
+    // Compare every card: a background STEP export finishing updates whichever card
+    // it belongs to, not necessarily the newest. Keep re-rendering while an export is
+    // pending so one that never finishes switches to "failed" on screen.
+    const sig = cards => cards.map(c => c.id + '@' + c.updated_at).join('|');
+    const changed = sig(fresh) !== sig(allCards) || fresh.some(c => c.step_export_status === 'pending');
     if (changed) {
       allCards = fresh;
       renderCurrentView();
@@ -722,9 +727,10 @@ function makeCardEl(card) {
     ${tags.length?`<div class="card-tags">${tags.join('')}</div>`:''}
     ${meta.length?`<div class="card-meta">${meta.join('')}</div>`:''}
     ${card.notes?`<div class="card-notes">${esc(card.notes.slice(0,80))}${card.notes.length>80?'…':''}</div>`:''}
-    ${(card.cad_link || card.step_file_url || card.pdf_file_url) ? `<div class="card-cad" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
+    ${(card.cad_link || card.step_file_url || card.pdf_file_url || stepExportState(card)) ? `<div class="card-cad" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">
       ${card.cad_link?`<a href="${safeHref(card.cad_link)}" target="_blank" onclick="event.stopPropagation()">↗ Open in OnShape</a>`:''}
       <span style="flex:1;"></span>
+      ${stepExportBadge(card)}
       ${card.step_file_url?`<button class="btn-step" onclick="event.stopPropagation();downloadStep(event,'${card.id}','${esc(card.step_file_name||card.step_file_url)}')">⬇ ${(card.step_file_name||'').toLowerCase().endsWith('.dxf')?'DXF':'STEP'}</button>`:''}
       ${card.pdf_file_url?`<button class="btn-pdf" onclick="event.stopPropagation();downloadPdf(event,'${card.id}','${esc(card.pdf_file_name||card.pdf_file_url)}')">⬇ PDF</button>`:''}
     </div>`:''}`;
@@ -815,7 +821,7 @@ function buildListView() {
 
         const stepHtml = card.step_file_url
           ? `<button class="lt-step-btn" onclick="downloadStep(event,'${card.id}','${esc(card.step_file_name||card.step_file_url)}')">⬇ ${(card.step_file_name||'').toLowerCase().endsWith('.dxf')?'DXF':'STEP'}</button>`
-          : '';
+          : stepExportBadge(card);
         const pdfHtml = card.pdf_file_url
           ? `<button class="btn-pdf" style="font-size:.65rem;padding:2px 7px;" onclick="downloadPdf(event,'${card.id}','${esc(card.pdf_file_name||card.pdf_file_url)}')">⬇ PDF</button>`
           : '';
@@ -1034,7 +1040,7 @@ async function saveCard() {
         thickness:updates.thickness, finish:updates.finish, quantity:updates.quantity,
         assigned_to:updates.assigned, cad_link:updates.cadLink, notes:updates.notes,
         is_critical:updates.isCritical,
-        ...('stepFileUrl' in updates ? { step_file_url:updates.stepFileUrl, step_file_name:updates.stepFileName } : {}),
+        ...('stepFileUrl' in updates ? { step_file_url:updates.stepFileUrl, step_file_name:updates.stepFileName, step_export_status:null } : {}),
         submitted_by:allCards[idx].submitted_by, created_at:allCards[idx].created_at };
       toast('Card updated');
     } else {
@@ -1063,6 +1069,29 @@ async function confirmDelete(id, fromModal=false) {
   allCards = allCards.filter(c=>c.id!==id); renderCurrentView();
   try { await apiPost({ action:'deleteCard', id }); toast('Card deleted'); }
   catch(e) { toast('Delete failed: '+e.message,'error'); loadCards(); }
+}
+
+// ── BACKGROUND STEP EXPORT STATUS ───────────────────────────────────────────
+// Cards submitted from the panel get their STEP file from a server-side export
+// (lib/step-export.js) that finishes after the card is created. A card still
+// "pending" after this long means the export died without recording a result.
+const STEP_EXPORT_STALE_MS = 3 * 60 * 1000;
+function stepExportState(card) {
+  if (card.step_file_url || !card.step_export_status) return null;
+  const s = card.step_export_status;
+  if (s === 'pending') {
+    const age = Date.now() - new Date(card.created_at).getTime();
+    return age > STEP_EXPORT_STALE_MS ? { kind: 'failed', reason: 'Export did not finish' } : { kind: 'pending' };
+  }
+  if (s.startsWith('failed')) return { kind: 'failed', reason: s.replace(/^failed:\s*/, '') };
+  return null;
+}
+function stepExportBadge(card, withReason = false) {
+  const st = stepExportState(card);
+  if (!st) return '';
+  if (st.kind === 'pending') return '<span class="step-export-badge pending">⏳ Exporting STEP</span>';
+  const tip = `${st.reason}. Attach the file with Edit.`;
+  return `<span class="step-export-badge failed" title="${esc(tip)}">⚠ STEP failed${withReason ? ': ' + esc(st.reason) : ''}</span>`;
 }
 
 // ── STEP / DXF DOWNLOAD ─────────────────────────────────────────────────────
@@ -1162,6 +1191,7 @@ function openDetailModal(id) {
   }
 
   // STEP button
+  document.getElementById('detail-step-export').innerHTML = stepExportBadge(card, true);
   const stepBtn = document.getElementById('detail-btn-step');
   stepBtn.style.display = card.step_file_url ? 'inline-flex' : 'none';
   stepBtn.textContent = '⬇ ' + ((card.step_file_name||'').toLowerCase().endsWith('.dxf') ? 'DXF' : 'STEP');

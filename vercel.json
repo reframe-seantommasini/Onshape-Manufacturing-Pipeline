@@ -1,9 +1,18 @@
 {
   "redirects": [
-    { "source": "/", "destination": "/onshape-panel" }
+    {
+      "source": "/",
+      "destination": "/onshape-panel"
+    }
   ],
   "functions": {
-    "api/onshape.js": { "memory": 512, "maxDuration": 30 },
-    "api/board.js":   { "memory": 256, "maxDuration": 15 }
+    "api/onshape.js": {
+      "memory": 512,
+      "maxDuration": 30
+    },
+    "api/board.js": {
+      "memory": 256,
+      "maxDuration": 60
+    }
   }
 }

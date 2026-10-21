@@ -8,6 +8,22 @@
 
 import { neon } from '@neondatabase/serverless';
 import { put, del } from '@vercel/blob';
+import { waitUntil } from '@vercel/functions';
+import { parseStepExportRequest, runStepExport, stepFilename } from '../lib/step-export.js';
+
+// ── Schema upgrade ───────────────────────────────────────────────────────────
+// step_export_status was added for background STEP export. Add it if missing,
+// checked once per function instance so existing deployments upgrade themselves.
+let _schemaReady = false;
+async function ensureSchema(sql) {
+  if (_schemaReady) return;
+  const cols = await sql`
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'cards' AND column_name = 'step_export_status'
+  `;
+  if (!cols.length) await sql`ALTER TABLE cards ADD COLUMN IF NOT EXISTS step_export_status text`;
+  _schemaReady = true;
+}
 
 // ── Google ID-token verification ─────────────────────────────────────────────
 // Destructive / mutating operations (update, move, delete) require a valid
@@ -83,6 +99,8 @@ export default async function handler(req, res) {
   const sql = neon(process.env.DATABASE_URL);
 
   try {
+    await ensureSchema(sql);
+
     // GET → getCards (requires auth — card data should not be world-readable)
     if (req.method === 'GET') {
       if (!await requireAuth(req, res)) return;
@@ -95,12 +113,14 @@ export default async function handler(req, res) {
 
     if (action === 'createCard') {
       const c = card;
+      // Optional background STEP export (see lib/step-export.js)
+      const stepExport = parseStepExportRequest(c.stepExport);
       const rows = await sql`
         INSERT INTO cards (
           name, status, project, machine, material, thickness,
           part_type, quantity, finish, assigned_to, cad_link, notes,
           step_file_url, step_file_name, pdf_file_url, pdf_file_name,
-          part_id, submitted_by, is_critical, thumbnail_url
+          part_id, submitted_by, is_critical, thumbnail_url, step_export_status
         ) VALUES (
           ${c.name        || ''},
           ${c.status      || 'Needs Drawing'},
@@ -121,10 +141,15 @@ export default async function handler(req, res) {
           ${c.partId      || null},
           ${c.submittedBy || c.student || null},
           ${c.isCritical  ? true : false},
-          ${c.thumbnailUrl || null}
+          ${c.thumbnailUrl || null},
+          ${stepExport ? 'pending' : null}
         )
         RETURNING *
       `;
+      if (stepExport) {
+        // Respond now; the export keeps running after the response is sent
+        waitUntil(runStepExport(sql, rows[0].id, stepExport, stepFilename(c.name)));
+      }
       return res.json({ ok: true, card: rows[0] });
 
     } else if (action === 'updateCard') {
@@ -161,6 +186,8 @@ export default async function handler(req, res) {
           pdf_file_name  = CASE WHEN ${u.pdfFileName    !== undefined} THEN ${u.pdfFileName    ?? null} ELSE pdf_file_name  END,
           is_critical    = CASE WHEN ${u.isCritical     !== undefined} THEN ${u.isCritical     ?? false} ELSE is_critical   END,
           thumbnail_url  = CASE WHEN ${u.thumbnailUrl   !== undefined} THEN ${u.thumbnailUrl   ?? null}  ELSE thumbnail_url  END,
+          -- A manual attach/remove replaces any background export state
+          step_export_status = CASE WHEN ${u.stepFileUrl !== undefined} THEN NULL ELSE step_export_status END,
           updated_at     = NOW()
         WHERE id = ${id}
       `;
